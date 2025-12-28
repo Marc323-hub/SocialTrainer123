@@ -1,0 +1,17 @@
+# sicherstellen, dass du im Repo-Ordner bist:
+cd "C:\Code\BlazeFace-PyTorch"
+
+# venv anlegen (nutzt Python 3.11)
+py -3.11 -m venv .venv
+# Wenn der Py-Launcher fehlt:
+# python -m venv .venv
+
+# venv aktivieren
+.\.venv\Scripts\Activate.ps1
+# Falls Skriptausführung blockiert ist (Fehler):
+# Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+# .\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install numpy opencv-python matplotlib

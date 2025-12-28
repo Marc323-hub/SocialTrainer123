@@ -542,56 +542,24 @@ def draw_detections_on_image(img_pil, detections):
 
 if __name__ == "__main__":
     import os
-    import re
-    from PIL import Image, ImageDraw
-
-    # Falls du Transformers nutzen willst:
-    # pip install transformers
+    import cv2
+    import time
+    from PIL import Image
     from transformers import AutoImageProcessor, AutoModelForImageClassification
 
     # === EINSTELLUNGEN: ggf. anpassen ===
     WEIGHTS_PATH = "blazeface.pth"
     ANCHORS_PATH = "anchors.npy"
-    OUTPUT_DIR = "outputs"  # wird automatisch erstellt
-
     EMO_MODEL_ID = "mo-thecreator/vit-Facial-Expression-Recognition"
     # ===================================
 
-    def safe_stem(filename: str) -> str:
-        """Macht einen Dateinamen-Teil sicher für Output-Dateien."""
-        stem = os.path.splitext(os.path.basename(filename))[0]
-        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)
-        return stem[:80]  # begrenzen
-
-    def draw_detections_on_image(img_pil, detections):
-        """Zeichnet Bounding Box + Score + Keypoints auf img_pil."""
-        draw = ImageDraw.Draw(img_pil)
-        W, H = img_pil.size
-
-        for det in detections:
-            ymin, xmin, ymax, xmax = det[:4].tolist()
-            score = float(det[16])
-
-            x0 = xmin * W
-            y0 = ymin * H
-            x1 = xmax * W
-            y1 = ymax * H
-
-            draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
-            draw.text((x0, max(0, y0 - 12)), f"{score:.2f}", fill="red")
-
-            # Optional: 6 Keypoints (gelb)
-            r = 2
-            for k in range(6):
-                px = float(det[4 + 2*k]) * W
-                py = float(det[4 + 2*k + 1]) * H
-                draw.ellipse([px - r, py - r, px + r, py + r], outline="yellow", width=2)
-
+    print("Lade BlazeFace-Modell...")
     # 1) BlazeFace laden (einmalig)
     model = BlazeFace(back_model=False)
     model.load_weights(WEIGHTS_PATH)
     model.load_anchors(ANCHORS_PATH)
 
+    print("Lade Emotions-Erkennungsmodell...")
     # 2) Emotion-/Mimik-Modell laden (einmalig)
     emo_device = model._device()
     emo_processor = AutoImageProcessor.from_pretrained(EMO_MODEL_ID)
@@ -599,6 +567,7 @@ if __name__ == "__main__":
     emo_model.eval()
 
     def predict_expression(face_pil):
+        """Erkennt die Emotion eines Gesichts-Crops."""
         inputs = emo_processor(images=face_pil, return_tensors="pt")
         inputs = {k: v.to(emo_device) for k, v in inputs.items()}
 
@@ -611,75 +580,114 @@ if __name__ == "__main__":
         conf = float(probs[idx].item())
         return label, conf
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # 3) Webcam öffnen
+    print("\nÖffne Webcam...")
+    cap = cv2.VideoCapture(0)
 
-    # 3) Interaktive Maske
-    print("\nBlazeFace-Runner (Frontmodell: 128x128)")
-    print("Gib einen Bild-Dateinamen ein (liegt im selben Ordner) oder einen vollen Pfad.")
-    print("Beenden mit ENTER ohne Eingabe.\n")
+    if not cap.isOpened():
+        print("FEHLER: Webcam konnte nicht geöffnet werden!")
+        exit(1)
+
+    # Webcam-Auflösung setzen (optional)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    print("\n" + "="*60)
+    print("LIVE GESTIK & MIMIK SCANNER")
+    print("="*60)
+    print("Drücke 'q' zum Beenden")
+    print("="*60 + "\n")
+
+    frame_count = 0
+    fps_start_time = time.time()
+    fps = 0
 
     while True:
-        img_path = input("Bilddatei: ").strip().strip('"')
-        if not img_path:
-            print("Beendet.")
+        ret, frame = cap.read()
+        if not ret:
+            print("Fehler beim Lesen des Webcam-Frames")
             break
 
-        if not os.path.exists(img_path):
-            candidate = os.path.join(os.getcwd(), img_path)
-            if os.path.exists(candidate):
-                img_path = candidate
-            else:
-                print(f"Fehler: Datei nicht gefunden: {img_path}")
-                continue
+        # FPS berechnen
+        frame_count += 1
+        if frame_count % 30 == 0:
+            fps = 30 / (time.time() - fps_start_time)
+            fps_start_time = time.time()
 
-        # 4) Bild laden (Original unverändert behalten)
-        img_orig = Image.open(img_path).convert("RGB")
+        # OpenCV-Frame (BGR) zu RGB konvertieren
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        H_orig, W_orig = frame_rgb.shape[:2]
 
-        # 5) Für Inferenz auf 128x128 skalieren (Frontmodell)
-        img_infer = img_orig.resize((128, 128))
-        img_np = np.array(img_infer)
+        # Für BlazeFace auf 128x128 skalieren
+        frame_128 = cv2.resize(frame_rgb, (128, 128))
 
-        # 6) Face-Detections
-        detections = model.predict_on_image(img_np)
-        print(f"Gefundene Gesichter: {detections.shape[0]}")
+        # Face-Detections durchführen
+        detections = model.predict_on_image(frame_128)
+        num_faces = detections.shape[0]
 
-        # 7) Auf eine Kopie zeichnen (Original bleibt sauber für Crops)
-        img_draw = img_orig.copy()
-        draw_detections_on_image(img_draw, detections)
-
-        # 8) Emotion-Label pro Gesicht (Crop aus img_orig, Zeichnen auf img_draw)
-        if detections.shape[0] > 0:
-            W, H = img_orig.size
-            draw = ImageDraw.Draw(img_draw)
-
+        # Detections zurück auf Original-Größe zeichnen
+        if num_faces > 0:
             for det in detections:
                 ymin, xmin, ymax, xmax = det[:4].tolist()
+                score = float(det[16])
 
-                # Normiert -> Pixel + clamp
-                x0 = max(0, int(xmin * W))
-                y0 = max(0, int(ymin * H))
-                x1 = min(W, int(xmax * W))
-                y1 = min(H, int(ymax * H))
+                # Normierte Koordinaten -> Pixel
+                x0 = int(xmin * W_orig)
+                y0 = int(ymin * H_orig)
+                x1 = int(xmax * W_orig)
+                y1 = int(ymax * H_orig)
 
-                # Sicherheitscheck
-                if x1 <= x0 or y1 <= y0:
-                    continue
+                # Bounding Box zeichnen
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 0), 2)
 
-                # Optional: Rand (10%)
-                pad_x = int(0.10 * (x1 - x0))
-                pad_y = int(0.10 * (y1 - y0))
-                x0 = max(0, x0 - pad_x)
-                y0 = max(0, y0 - pad_y)
-                x1 = min(W, x1 + pad_x)
-                y1 = min(H, y1 + pad_y)
+                # Score anzeigen
+                cv2.putText(frame, f"{score:.2f}", (x0, max(0, y0 - 35)),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                face_crop = img_orig.crop((x0, y0, x1, y1))
-                label, conf = predict_expression(face_crop)
+                # Keypoints zeichnen
+                for k in range(6):
+                    px = int(float(det[4 + 2*k]) * W_orig)
+                    py = int(float(det[4 + 2*k + 1]) * H_orig)
+                    cv2.circle(frame, (px, py), 3, (255, 255, 0), -1)
 
-                draw.text((x0, max(0, y0 - 18)), f"{label} ({conf:.2f})", fill="red")
+                # Face-Crop für Emotions-Erkennung
+                if x1 > x0 and y1 > y0:
+                    # Optional: Padding hinzufügen
+                    pad_x = int(0.10 * (x1 - x0))
+                    pad_y = int(0.10 * (y1 - y0))
+                    x0_crop = max(0, x0 - pad_x)
+                    y0_crop = max(0, y0 - pad_y)
+                    x1_crop = min(W_orig, x1 + pad_x)
+                    y1_crop = min(H_orig, y1 + pad_y)
 
-        # 9) Speichern
-        out_name = f"{safe_stem(img_path)}_result.png"
-        out_path = os.path.join(OUTPUT_DIR, out_name)
-        img_draw.save(out_path)
-        print(f"Output gespeichert: {out_path}\n")
+                    face_crop_np = frame_rgb[y0_crop:y1_crop, x0_crop:x1_crop]
+
+                    if face_crop_np.size > 0:
+                        face_crop_pil = Image.fromarray(face_crop_np)
+                        emotion_label, emotion_conf = predict_expression(face_crop_pil)
+
+                        # Emotion über dem Gesicht anzeigen
+                        emotion_text = f"{emotion_label} ({emotion_conf:.2f})"
+                        cv2.putText(frame, emotion_text, (x0, max(0, y0 - 10)),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        # Status-Informationen anzeigen
+        status_text = f"FPS: {fps:.1f} | Gesichter: {num_faces}"
+        cv2.putText(frame, status_text, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        cv2.putText(frame, "Druecke 'q' zum Beenden", (10, H_orig - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        # Frame anzeigen
+        cv2.imshow('Gestik & Mimik Scanner', frame)
+
+        # Beenden mit 'q'
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("\nBeende Scanner...")
+            break
+
+    # Aufräumen
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Scanner beendet.")

@@ -13,14 +13,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Versuche MediaPipe zu importieren
+# Versuche MediaPipe zu importieren UND zu testen
 try:
     import mediapipe as mp
+    # Teste ob solutions verfügbar ist (Python 3.14 Kompatibilität)
+    _ = mp.solutions.face_mesh
     MEDIAPIPE_AVAILABLE = True
     print("✓ MediaPipe gefunden - verwende 468 Landmarks")
-except (ImportError, AttributeError):
+except (ImportError, AttributeError) as e:
     MEDIAPIPE_AVAILABLE = False
     print("✗ MediaPipe nicht verfügbar - verwende BlazeFace mit 6 Keypoints")
+    if 'mediapipe' in str(e):
+        print("  (Hinweis: Python 3.14 wird von MediaPipe noch nicht vollständig unterstützt)")
 
 # === EINSTELLUNGEN ===
 EMO_MODEL_ID = "trpakov/vit-face-expression"
